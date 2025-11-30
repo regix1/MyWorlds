@@ -32,6 +32,7 @@ import org.bukkit.OfflinePlayer;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.HumanEntity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.EquipmentSlot;
 
@@ -300,10 +301,6 @@ public class MWPlayerDataController extends PlayerDataController {
         // Import legacy positions of all worlds we need to check
         LastPlayerPositionList lastPositions = readLastPlayerPositions(player, possibleWorldConfigs);
         for (LastPlayerPositionList.LastPosition pos : lastPositions.all(true)) {
-            if (pos.hasDied()) {
-                break; // Fail instantly if the player last died here
-            }
-
             World posWorld = pos.getWorld();
             if (posWorld == null) {
                 continue; // Not loaded
@@ -311,6 +308,11 @@ public class MWPlayerDataController extends PlayerDataController {
 
             for (WorldConfig wc : possibleWorldConfigs) {
                 if (wc.getWorld() == posWorld) {
+                    // Fail instantly if the player last died here
+                    if (pos.hasDied()) {
+                        return null;
+                    }
+
                     Location loc = pos.getLocation();
                     if (loc == null) {
                         break; // Not loaded? Eh?
@@ -695,7 +697,40 @@ public class MWPlayerDataController extends PlayerDataController {
                 // Load the data
                 NBTUtil.loadInventory(player.getInventory(), playerData.createList(VANILLA_INVENTORY_TAG));
                 NBTUtil.loadEquipment(player.getEquipment(), playerData.get("equipment", CommonTagCompound.class));
+
+                // Initialize spawn point
+                PlayerRespawnPoint respawnPoint = PlayerRespawnPoint.fromNBT(playerData);
+                if (!MWPlayerDataController.isValidRespawnPoint(player.getWorld(), respawnPoint)) {
+                    respawnPoint = PlayerRespawnPoint.NONE;
+                }
+                respawnPoint.applyToPlayer(player);
+
+                NBTUtil.loadFoodMetaData(playerHandle.getFoodDataRaw(), playerData);
+                NBTUtil.loadInventory(player.getEnderChest(), playerData.createList(VANILLA_ENDER_CHEST_TAG));
                 player.getInventory().setHeldItemSlot(playerData.getValue("SelectedItemSlot", 0));
+
+                // Load Potion Effects active on the player right now
+                // Better to do this early in case later equipment changes alter them again
+                {
+                    Map<Holder<MobEffectListHandle>, MobEffectHandle> effects = playerHandle.getMobEffects();
+                    CommonTagList effectsTagList = readPotionEffects(playerData);
+                    if (effectsTagList != null) {
+                        for (int i = 0; i < effectsTagList.size(); ++i) {
+                            MobEffectHandle mobEffect = NBTUtil.loadMobEffect((CommonTagCompound) effectsTagList.get(i));
+                            if (mobEffect != null) {
+                                effects.put(mobEffect.getEffectList(), mobEffect);
+                            }
+                        }
+                    }
+                    playerHandle.setUpdateEffects(true);
+                }
+
+                // Refresh equipment modifiers now. If they change things that the current value depends on,
+                // like health, then they will be applied properly.
+                if (Common.hasCapability("Common:EntityUtil:detectEquipmentChanges")) {
+                    detectEquipmentChanges(player);
+                }
+
                 playerHandle.setExp(playerData.getValue("XpP", 0.0f));
                 playerHandle.setExpLevel(playerData.getValue("XpLevel", 0));
                 playerHandle.setExpTotal(playerData.getValue("XpTotal", 0));
@@ -725,6 +760,12 @@ public class MWPlayerDataController extends PlayerDataController {
                     }
                 }
 
+                if (playerData.containsKey("playerGameType")) {
+                    player.setGameMode(GameMode.getByValue(playerData.getValue("playerGameType", 1)));
+                }
+
+                // data.getValue("Bukkit.MaxHealth", (float) commonPlayer.getMaxHealth());
+
                 {
                     final double maxHealth = commonPlayer.getMaxHealth();
                     final double health;
@@ -737,37 +778,6 @@ public class MWPlayerDataController extends PlayerDataController {
                         health = playerData.getValue("Health", maxHealth);
                     }
                     commonPlayer.setHealth(Math.min(maxHealth, health));
-                }
-
-                // Initialize spawn point
-                PlayerRespawnPoint respawnPoint = PlayerRespawnPoint.fromNBT(playerData);
-                if (!MWPlayerDataController.isValidRespawnPoint(player.getWorld(), respawnPoint)) {
-                    respawnPoint = PlayerRespawnPoint.NONE;
-                }
-                respawnPoint.applyToPlayer(player);
-
-                NBTUtil.loadFoodMetaData(playerHandle.getFoodDataRaw(), playerData);
-                NBTUtil.loadInventory(player.getEnderChest(), playerData.createList(VANILLA_ENDER_CHEST_TAG));
-
-                if (playerData.containsKey("playerGameType")) {
-                    player.setGameMode(GameMode.getByValue(playerData.getValue("playerGameType", 1)));
-                }
-
-                // data.getValue("Bukkit.MaxHealth", (float) commonPlayer.getMaxHealth());
-
-                // Load Mob Effects
-                {
-                    Map<Holder<MobEffectListHandle>, MobEffectHandle> effects = playerHandle.getMobEffects();
-                    CommonTagList effectsTagList = readPotionEffects(playerData);
-                    if (effectsTagList != null) {
-                        for (int i = 0; i < effectsTagList.size(); ++i) {
-                            MobEffectHandle mobEffect = NBTUtil.loadMobEffect((CommonTagCompound) effectsTagList.get(i));
-                            if (mobEffect != null) {
-                                effects.put(mobEffect.getEffectList(), mobEffect);
-                            }
-                        }
-                    }
-                    playerHandle.setUpdateEffects(true);
                 }
 
                 // Perform post loading
@@ -806,6 +816,11 @@ public class MWPlayerDataController extends PlayerDataController {
                 plugin.getLogger().log(Level.WARNING, "Failed to load player data for " + player.getName(), t);
             }
         }
+    }
+
+    // Only available BKCommonLib 1.21.10-v2+
+    private static void detectEquipmentChanges(LivingEntity livingEntity) {
+        EntityUtil.detectEquipmentChanges(livingEntity);
     }
 
     /**
@@ -916,8 +931,12 @@ public class MWPlayerDataController extends PlayerDataController {
         synchronized (getLock(player)) {
             final PlayerDataFileCollection files = new PlayerDataFileCollection(player, WorldConfig.getVanillaMain().getWorld());
 
-            // If a main world player data file exists, then the player has been on the server before
-            boolean hasPlayedBefore = files.mainWorldFile.exists();
+            // If no main world player data file exists, just return null instantly
+            // This indicates to the server this player has not played before
+            // We cannot return anything else as that will break that mechanism
+            if (!files.mainWorldFile.exists()) {
+                return new LoadResult(files, null, false);
+            }
 
             // Read the main world file first. We need this information regardless of whether or not
             // the MyWorlds inventories system is enabled. In here we store what world to send the player
@@ -925,12 +944,8 @@ public class MWPlayerDataController extends PlayerDataController {
             // various worlds.
             // If loading of this main world player profile fails, then we can't do anything more,
             // anyway.
-            CommonTagCompound mainWorldData = null;
-            CommonTagCompound playerData = null;
-            if (hasPlayedBefore) {
-                mainWorldData = files.mainWorldFile.read();
-                playerData = mainWorldData; // Changed later if needed
-            }
+            CommonTagCompound mainWorldData = files.mainWorldFile.read();
+            CommonTagCompound playerData = mainWorldData; // Changed later if needed
 
             // If player data was inventory edited, recover the original data of this world stored in a separate MyWorlds tag.
             // Write the original data back to the vanilla world, and apply the inventory-edited modified contents
@@ -957,12 +972,12 @@ public class MWPlayerDataController extends PlayerDataController {
 
             // If set to true, force player to respawn at the server spawn location as if joining
             // for the first time
-            boolean respawnAtServerSpawn = !hasPlayedBefore;
+            boolean respawnAtServerSpawn = false;
 
             // TODO: This broke
             // If force-joining the main world is enabled, and we got main world data, switch
             // the stored world to the MyWorlds main world
-            if (MyWorlds.forceJoinOnMainWorld && hasPlayedBefore && mainWorldData != null) {
+            if (MyWorlds.forceJoinOnMainWorld && mainWorldData != null) {
                 boolean ignored;
                 if (plugin.isEnabled() && player.isOnline()) {
                     // Happens to be online, so we can check it right away
@@ -979,20 +994,18 @@ public class MWPlayerDataController extends PlayerDataController {
             }
 
             // Check world player was last on actually still exists
-            World lastPlayerWorld = hasPlayedBefore ? Bukkit.getWorld(mainWorldData.getUUID("World")) : null;
+            World lastPlayerWorld = Bukkit.getWorld(mainWorldData.getUUID("World"));
             if (lastPlayerWorld == null) {
                 respawnAtServerSpawn = true;
 
                 // In this state we can't send a message to the player, delay it until the player
                 // has logged in
-                if (hasPlayedBefore) {
-                    plugin.listener.scheduleForPlayerJoin(player, 100, Localization.WORLD_JOIN_REMOVED::message);
-                }
+                plugin.listener.scheduleForPlayerJoin(player, 100, Localization.WORLD_JOIN_REMOVED::message);
             }
 
             // Find out where to find the save file
             // No need to check for this if not using world inventories - it is always the main file then
-            if (MyWorlds.useWorldInventories && hasPlayedBefore && lastPlayerWorld != null) {
+            if (MyWorlds.useWorldInventories && lastPlayerWorld != null) {
                 try {
                     // Allow switching worlds and positions
                     // Switch to the save file of the loaded world
@@ -1099,7 +1112,7 @@ public class MWPlayerDataController extends PlayerDataController {
             // but it is kept when inventory-editing plugins write the nbt back to the vanilla world.
             InventoryEditRecovery.writeInventoryRecoveryData(files, mainWorldData, playerData);
 
-            return new LoadResult(files, playerData, hasPlayedBefore);
+            return new LoadResult(files, playerData, true);
         }
     }
 
@@ -1352,7 +1365,12 @@ public class MWPlayerDataController extends PlayerDataController {
 
     private static void removeInvalidBedSpawn(World world, CommonTagCompound playerData) {
         PlayerRespawnPoint current = PlayerRespawnPoint.fromNBT(playerData);
-        if (!current.isNone() && !WorldConfig.get(current.getWorld()).getBedRespawnMode().persistInProfile()) {
+        if (current.isNone()) {
+            return;
+        }
+
+        World currentSpawnWorld = current.getWorld();
+        if (currentSpawnWorld == null || !WorldConfig.get(current.getWorld()).getBedRespawnMode().persistInProfile()) {
             PlayerRespawnPoint.NONE.toNBT(playerData);
         } else if (!isValidRespawnPoint(world, current)) {
             PlayerRespawnPoint.NONE.toNBT(playerData);
@@ -1380,6 +1398,11 @@ public class MWPlayerDataController extends PlayerDataController {
          * @param player Player
          */
         public void applyToPlayer(Player player) {
+            if (data == null) {
+                PlayerUtil.setHasPlayedBefore(player, hasPlayedBefore);
+                return;
+            }
+
             // Minecraft bugfix here: Clear mob/potion effects BEFORE loading the data
             // This resolves issues with effects staying behind
             resetCurrentMobEffects(player);
