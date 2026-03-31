@@ -11,6 +11,7 @@ import java.util.Random;
 import java.util.logging.Level;
 
 import com.bergerkiller.bukkit.common.Task;
+import com.bergerkiller.bukkit.mw.utils.GameRuleWrapper;
 import com.bergerkiller.mountiplex.logic.TextValueSequence;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
@@ -139,7 +140,7 @@ public class WorldConfig extends WorldConfigStore {
             this.respawnPoint = RespawnPoint.DEFAULT;
             this.pvp = world.getPVP();
             this.autosave = world.isAutoSave();
-            this.allowHealthRegen = !"false".equals(world.getGameRuleValue("naturalRegeneration"));
+            this.allowHealthRegen = GameRuleWrapper.NATURAL_HEALTH_REGENERATION.get(world);
             this.getChunkGeneratorName();
         } else {
             this.alias = worldname;
@@ -195,6 +196,11 @@ public class WorldConfig extends WorldConfigStore {
                     .distinct()
                     .max(Comparator.comparing(inv -> inv.getWorlds().size()))
                     .ifPresent(inventory -> inventory.add(this.worldname));
+
+            if (this.startupLoadMode != WorldStartupLoadMode.IGNORE && MyWorlds.plugin.getMythicDungeonsHelper().isDungeonWorld(w)) {
+                MyWorlds.plugin.getLogger().log(Level.INFO, "Detected world '" + worldname + "' is a Mythic Dungeons world, world will not be auto-loaded on startup");
+                this.setStartupLoadMode(WorldStartupLoadMode.IGNORE);
+            }
         }
     }
 
@@ -435,7 +441,7 @@ public class WorldConfig extends WorldConfigStore {
             this.difficulty = w.getDifficulty();
             this.keepSpawnInMemory = w.getKeepSpawnInMemory();
             this.autosave = w.isAutoSave();
-            this.allowHealthRegen = Util.GAME_RULE_NATURAL_REGENERATION.get(w);
+            this.allowHealthRegen = GameRuleWrapper.NATURAL_HEALTH_REGENERATION.get(w);
         }
         if (this.worldname == null || this.worldname.equals(this.getConfigName())) {
             node.remove("name");
@@ -844,7 +850,12 @@ public class WorldConfig extends WorldConfigStore {
         // Link inventories if it is a mythic dungeons instance
         // Also run this next-tick, just in case the instance isn't initialized yet during world load.
         detectMythicDungeonsInstance();
-        CommonUtil.nextTick(() -> detectMythicDungeonsInstance());
+        new Task(this.plugin) {
+            @Override
+            public void run() {
+                detectMythicDungeonsInstance();
+            }
+        }.start(2);
         // If advancements are disabled on this world, let the advancement manager know
         if (!advancementsEnabled) {
             MyWorlds.plugin.getAdvancementManager().notifyAdvancementsDisabledOnWorld();
@@ -937,7 +948,7 @@ public class WorldConfig extends WorldConfigStore {
     }
     public void updateHealthRegen(World world) {
         if (world != null) {
-            Util.GAME_RULE_NATURAL_REGENERATION.set(world, allowHealthRegen);
+            GameRuleWrapper.NATURAL_HEALTH_REGENERATION.set(world, allowHealthRegen);
         }
     }
     public void updateOP(Player player) {
