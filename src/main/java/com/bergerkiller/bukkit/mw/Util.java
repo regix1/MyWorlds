@@ -7,10 +7,10 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import com.bergerkiller.bukkit.common.MaterialBooleanProperty;
+import com.bergerkiller.bukkit.common.wrappers.BlockProperty;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
@@ -28,7 +28,7 @@ import com.bergerkiller.bukkit.common.MaterialTypeProperty;
 import com.bergerkiller.bukkit.common.utils.MaterialUtil;
 import com.bergerkiller.bukkit.common.utils.WorldUtil;
 import com.bergerkiller.bukkit.common.wrappers.BlockData;
-import com.bergerkiller.generated.net.minecraft.world.phys.AxisAlignedBBHandle;
+import com.bergerkiller.generated.net.minecraft.world.phys.AABBHandle;
 
 public class Util {
     public static final MaterialTypeProperty IS_END_PORTAL = new MaterialTypeProperty("END_PORTAL", "LEGACY_ENDER_PORTAL");
@@ -56,18 +56,19 @@ public class Util {
             }
 
             // Try to find a 'waterlogged' state, and if present, return its state
-            for (Map.Entry<?, Comparable<?>> state : blockData.getStates().entrySet()) {
-                if (!(state.getValue() instanceof Boolean)) {
+            for (BlockProperty<?> property : blockData.getProperties()) {
+                Object value = blockData.getProperty(property);
+                if (!(value instanceof Boolean)) {
                     continue;
                 }
                 String name;
                 try {
-                    name = (String) state.getKey().getClass().getMethod("name").invoke(state.getKey());
+                    name = (String) property.getClass().getMethod("name").invoke(property);
                 } catch (Throwable t) {
                     throw new RuntimeException("Failed to read block state name()", t);
                 }
                 if ("waterlogged".equals(name)) {
-                    return (Boolean) state.getValue();
+                    return (Boolean) value;
                 }
             }
 
@@ -168,10 +169,10 @@ public class Util {
         }
 
         Block block = location.getBlock();
-        AxisAlignedBBHandle blockBB = WorldUtil.getBlockData(block).getBoundingBox(block);
+        AABBHandle blockBB = WorldUtil.getBlockData(block).getBoundingBox(block);
         for (int n = 0; n < 20; n++) {
             Block above = block.getRelative(BlockFace.UP);
-            AxisAlignedBBHandle aboveBB = WorldUtil.getBlockData(above).getBoundingBox(above);
+            AABBHandle aboveBB = WorldUtil.getBlockData(above).getBoundingBox(above);
             double floorY = block.getY();
             double ceilY = floorY + 2.0;
 
